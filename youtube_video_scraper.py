@@ -130,6 +130,10 @@ try:
         r = get_with_retry(PLAYLIST_API_URL, playlist_params)
         check_quota(r)
 
+        if "items" not in r:
+            print(f"Skipping {channel_name} ({channel_id}): no videos found "
+                  f"({r.get('error', {}).get('errors', [{}])[0].get('reason', 'unknown')})")
+
         if "items" in r:
             pageToken = r.get("nextPageToken")
             print(f"Scraping {channel_name}'s videos:")
