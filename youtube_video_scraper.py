@@ -20,8 +20,9 @@ with open("config.yml", "r", encoding="utf-8") as f:
 API_KEY = config["API_KEY"]
 CHANNELS_API_URL = "https://www.googleapis.com/youtube/v3/channels"
 PLAYLIST_API_URL = "https://www.googleapis.com/youtube/v3/playlistItems"
+VIDEOS_API_URL = "https://www.googleapis.com/youtube/v3/videos"
 OUTPUT_FOLDER = config["output_folder"]
-OUTPUT_FIELDS = ["video_id", "title", "video_published_at"]
+OUTPUT_FIELDS = ["video_id", "title", "video_published_at", "view_count"]
 channel_ids = config["channel_ids"]
 
 channels_params = {
@@ -34,6 +35,23 @@ playlist_params = {
     "part": "snippet",
     "maxResults": 50,
 }
+
+videos_params = {
+    "key": API_KEY,
+    "part": "statistics",
+}
+
+
+def get_view_counts(video_ids):
+    view_counts = {}
+    for i in range(0, len(video_ids), 50):
+        batch = video_ids[i : i + 50]
+        videos_params.update({"id": ",".join(batch)})
+        r = requests.get(VIDEOS_API_URL, params=videos_params).json()
+        for item in r.get("items", []):
+            view_counts[item["id"]] = item["statistics"].get("viewCount", "")
+        time.sleep(0.1)
+    return view_counts
 
 for channel_id in channel_ids:
     channels_params.update({"id": channel_id})
@@ -57,6 +75,29 @@ for channel_id in channel_ids:
         pageToken = r.get("nextPageToken")
         print(f"Scraping {channel_name}'s videos:")
         pbar = tqdm(total=r["pageInfo"]["totalResults"])
+
+        videos = [process_video(video["snippet"]) for video in r["items"]]
+        pbar.update(len(r["items"]))
+
+        # process the rest
+        while pageToken:
+            playlist_params.update({"pageToken": pageToken})
+            r = requests.get(
+                PLAYLIST_API_URL,
+                params=playlist_params,
+            ).json()
+            videos.extend(process_video(video["snippet"]) for video in r["items"])
+            pbar.update(len(r["items"]))
+            pageToken = r.get("nextPageToken")
+            time.sleep(0.1)
+        pbar.close()
+        # reset pageToken for new channel
+        playlist_params.update({"pageToken": None})
+
+        view_counts = get_view_counts([video["video_id"] for video in videos])
+        for video in videos:
+            video["view_count"] = view_counts.get(video["video_id"], "")
+
         with open(
             os.path.join(OUTPUT_FOLDER, f"{channel_name}.csv".replace(os.sep, "_")),
             "w",
@@ -64,24 +105,4 @@ for channel_id in channel_ids:
         ) as f:
             w = csv.DictWriter(f, fieldnames=OUTPUT_FIELDS)
             w.writeheader()
-
-            # process first page we already queried
-            for video in r["items"]:
-                w.writerow(process_video(video["snippet"]))
-            pbar.update(len(r["items"]))
-
-            # process the rest
-            while pageToken:
-                playlist_params.update({"pageToken": pageToken})
-                r = requests.get(
-                    PLAYLIST_API_URL,
-                    params=playlist_params,
-                ).json()
-                for video in r["items"]:
-                    w.writerow(process_video(video["snippet"]))
-                pbar.update(len(r["items"]))
-                pageToken = r.get("nextPageToken")
-                time.sleep(0.1)
-        pbar.close()
-        # reset pageToken for new channel
-        playlist_params.update({"pageToken": None})
+            w.writerows(videos)
