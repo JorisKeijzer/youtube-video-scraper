@@ -3,7 +3,30 @@ import csv
 import os
 from tqdm import tqdm
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import time
+
+session = requests.Session()
+retries = Retry(
+    total=5,
+    backoff_factor=2,
+    status_forcelist=[429, 500, 502, 503, 504],
+)
+session.mount("https://", HTTPAdapter(max_retries=retries))
+session.mount("http://", HTTPAdapter(max_retries=retries))
+
+
+def get_with_retry(url, params):
+    for attempt in range(5):
+        try:
+            return session.get(url, params=params, timeout=30).json()
+        except requests.exceptions.RequestException as e:
+            if attempt == 4:
+                raise
+            wait = 2 ** attempt
+            print(f"\nNetwork error ({e}), retrying in {wait}s...")
+            time.sleep(wait)
 
 
 def process_video(video_snippet):
@@ -59,7 +82,7 @@ def get_view_counts(video_ids):
     for i in range(0, len(video_ids), 50):
         batch = video_ids[i : i + 50]
         videos_params.update({"id": ",".join(batch)})
-        r = requests.get(VIDEOS_API_URL, params=videos_params).json()
+        r = get_with_retry(VIDEOS_API_URL, videos_params)
         check_quota(r)
         for item in r.get("items", []):
             view_counts[item["id"]] = item["statistics"].get("viewCount", "")
@@ -70,10 +93,7 @@ try:
     for channel_id in channel_ids:
         channels_params.update({"id": channel_id})
 
-        r = requests.get(
-            CHANNELS_API_URL,
-            params=channels_params,
-        ).json()
+        r = get_with_retry(CHANNELS_API_URL, channels_params)
         check_quota(r)
 
         if not r.get("items"):
@@ -92,10 +112,7 @@ try:
         uploads_id = r["items"][0]["contentDetails"]["relatedPlaylists"]["uploads"]
 
         playlist_params.update({"playlistId": uploads_id})
-        r = requests.get(
-            PLAYLIST_API_URL,
-            params=playlist_params,
-        ).json()
+        r = get_with_retry(PLAYLIST_API_URL, playlist_params)
         check_quota(r)
 
         if "items" in r:
@@ -109,10 +126,7 @@ try:
             # process the rest
             while pageToken:
                 playlist_params.update({"pageToken": pageToken})
-                r = requests.get(
-                    PLAYLIST_API_URL,
-                    params=playlist_params,
-                ).json()
+                r = get_with_retry(PLAYLIST_API_URL, playlist_params)
                 check_quota(r)
                 videos.extend(process_video(video["snippet"]) for video in r["items"])
                 pbar.update(len(r["items"]))
