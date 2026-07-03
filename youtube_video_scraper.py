@@ -27,8 +27,20 @@ channel_ids = config["channel_ids"]
 
 channels_params = {
     "key": API_KEY,
-    "part": "contentDetails",
+    "part": "contentDetails,snippet",
 }
+
+
+class QuotaExceeded(Exception):
+    pass
+
+
+def check_quota(r):
+    if r.get("error", {}).get("errors", [{}])[0].get("reason") in (
+        "quotaExceeded",
+        "dailyLimitExceeded",
+    ):
+        raise QuotaExceeded()
 
 playlist_params = {
     "key": API_KEY,
@@ -48,61 +60,77 @@ def get_view_counts(video_ids):
         batch = video_ids[i : i + 50]
         videos_params.update({"id": ",".join(batch)})
         r = requests.get(VIDEOS_API_URL, params=videos_params).json()
+        check_quota(r)
         for item in r.get("items", []):
             view_counts[item["id"]] = item["statistics"].get("viewCount", "")
         time.sleep(0.1)
     return view_counts
 
-for channel_id in channel_ids:
-    channels_params.update({"id": channel_id})
+try:
+    for channel_id in channel_ids:
+        channels_params.update({"id": channel_id})
 
-    r = requests.get(
-        CHANNELS_API_URL,
-        params=channels_params,
-    ).json()
+        r = requests.get(
+            CHANNELS_API_URL,
+            params=channels_params,
+        ).json()
+        check_quota(r)
 
-    # the uploads_id indicates the playlist where a channel's uploads are located
-    uploads_id = r["items"][0]["contentDetails"]["relatedPlaylists"]["uploads"]
+        if not r.get("items"):
+            print(f"Skipping {channel_id}: channel not found")
+            continue
 
-    playlist_params.update({"playlistId": uploads_id})
-    r = requests.get(
-        PLAYLIST_API_URL,
-        params=playlist_params,
-    ).json()
+        channel_name = r["items"][0]["snippet"]["title"]
+        output_path = os.path.join(
+            OUTPUT_FOLDER, f"{channel_name}.csv".replace(os.sep, "_")
+        )
+        if os.path.exists(output_path):
+            print(f"Skipping {channel_name}: already scraped")
+            continue
 
-    if "items" in r:
-        channel_name = r["items"][0]["snippet"]["channelTitle"]
-        pageToken = r.get("nextPageToken")
-        print(f"Scraping {channel_name}'s videos:")
-        pbar = tqdm(total=r["pageInfo"]["totalResults"])
+        # the uploads_id indicates the playlist where a channel's uploads are located
+        uploads_id = r["items"][0]["contentDetails"]["relatedPlaylists"]["uploads"]
 
-        videos = [process_video(video["snippet"]) for video in r["items"]]
-        pbar.update(len(r["items"]))
+        playlist_params.update({"playlistId": uploads_id})
+        r = requests.get(
+            PLAYLIST_API_URL,
+            params=playlist_params,
+        ).json()
+        check_quota(r)
 
-        # process the rest
-        while pageToken:
-            playlist_params.update({"pageToken": pageToken})
-            r = requests.get(
-                PLAYLIST_API_URL,
-                params=playlist_params,
-            ).json()
-            videos.extend(process_video(video["snippet"]) for video in r["items"])
-            pbar.update(len(r["items"]))
+        if "items" in r:
             pageToken = r.get("nextPageToken")
-            time.sleep(0.1)
-        pbar.close()
-        # reset pageToken for new channel
-        playlist_params.update({"pageToken": None})
+            print(f"Scraping {channel_name}'s videos:")
+            pbar = tqdm(total=r["pageInfo"]["totalResults"])
 
-        view_counts = get_view_counts([video["video_id"] for video in videos])
-        for video in videos:
-            video["view_count"] = view_counts.get(video["video_id"], "")
+            videos = [process_video(video["snippet"]) for video in r["items"]]
+            pbar.update(len(r["items"]))
 
-        with open(
-            os.path.join(OUTPUT_FOLDER, f"{channel_name}.csv".replace(os.sep, "_")),
-            "w",
-            encoding="utf-8",
-        ) as f:
-            w = csv.DictWriter(f, fieldnames=OUTPUT_FIELDS)
-            w.writeheader()
-            w.writerows(videos)
+            # process the rest
+            while pageToken:
+                playlist_params.update({"pageToken": pageToken})
+                r = requests.get(
+                    PLAYLIST_API_URL,
+                    params=playlist_params,
+                ).json()
+                check_quota(r)
+                videos.extend(process_video(video["snippet"]) for video in r["items"])
+                pbar.update(len(r["items"]))
+                pageToken = r.get("nextPageToken")
+                time.sleep(0.1)
+            pbar.close()
+            # reset pageToken for new channel
+            playlist_params.update({"pageToken": None})
+
+            view_counts = get_view_counts([video["video_id"] for video in videos])
+            for video in videos:
+                video["view_count"] = view_counts.get(video["video_id"], "")
+
+            with open(output_path, "w", encoding="utf-8") as f:
+                w = csv.DictWriter(f, fieldnames=OUTPUT_FIELDS)
+                w.writeheader()
+                w.writerows(videos)
+except QuotaExceeded:
+    print("\nYouTube API daily quota exceeded. Stopping cleanly — already-scraped "
+          "channels are saved. Re-run this script after the quota resets to pick up "
+          "where it left off (already-completed channels are skipped automatically).")
