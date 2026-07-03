@@ -89,6 +89,8 @@ def get_view_counts(video_ids):
         time.sleep(0.1)
     return view_counts
 
+seen_titles = set()
+
 try:
     for channel_id in channel_ids:
         channels_params.update({"id": channel_id})
@@ -101,18 +103,25 @@ try:
             continue
 
         channel_name = r["items"][0]["snippet"]["title"]
-        # some channels share an identical display name; fall back to a
-        # channel_id-suffixed filename so they don't collide with each other
+        # some channels share an identical display name; the first channel
+        # with a given title (per config order) uses the plain filename,
+        # any later one with the same title is forced onto a channel_id
+        # suffixed filename so they don't collide with each other
         legacy_path = os.path.join(
             OUTPUT_FOLDER, f"{channel_name}.csv".replace(os.sep, "_")
         )
         disambiguated_path = os.path.join(
             OUTPUT_FOLDER, f"{channel_name} ({channel_id}).csv".replace(os.sep, "_")
         )
-        if os.path.exists(legacy_path) or os.path.exists(disambiguated_path):
+        if channel_name in seen_titles:
+            output_path = disambiguated_path
+        else:
+            seen_titles.add(channel_name)
+            output_path = legacy_path
+
+        if os.path.exists(output_path):
             print(f"Skipping {channel_name} ({channel_id}): already scraped")
             continue
-        output_path = disambiguated_path
 
         # the uploads_id indicates the playlist where a channel's uploads are located
         uploads_id = r["items"][0]["contentDetails"]["relatedPlaylists"]["uploads"]
