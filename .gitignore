@@ -1,3 +1,5 @@
 *.csv
 *test.py
 .DS_Store
+config.yml
+data/.delivered_channels.txt
